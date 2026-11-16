@@ -1,0 +1,45 @@
+# Runs once a day at 17:30 UTC = 12:30 PM ET = 1:30 AM Manila (next day), one hour after the 11:30 AM ET send.
+# Last useful run: Nov 24 (Nov 25 1:30 AM Manila). After Nov 25 it does nothing; disable with:
+#   gh workflow disable "Daily email archive" -R pj807/wc6-emails
+name: Daily email archive
+on:
+  schedule:
+    - cron: "30 17 * * *"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency: { group: archive, cancel-in-progress: false }
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Stop after the sequence ends (Nov 25 ET)
+        run: |
+          if [ "$(TZ=America/New_York date +%Y%m%d)" -gt 20261125 ]; then echo "Sequence over; nothing to do."; echo "DONE=1" >> $GITHUB_ENV; fi
+      - name: Pull newly sent emails from GHL, clean, check
+        if: env.DONE != '1'
+        id: build
+        env:
+          GHL_TOKEN: ${{ secrets.GHL_TOKEN }}     # read-only key (same as the KPI dashboard)
+          NOTES_FILE: run-notes.md
+        run: |
+          set +e
+          python3 tools/build_archive.py --out emails.json
+          echo "code=$?" >> $GITHUB_OUTPUT
+          if [ -f run-notes.md ]; then cat run-notes.md >> $GITHUB_STEP_SUMMARY; rm run-notes.md; fi
+      - name: Publish emails.json if it changed
+        if: env.DONE != '1'
+        run: |
+          if git diff --quiet -- emails.json; then echo "No new sent emails." >> $GITHUB_STEP_SUMMARY; exit 0; fi
+          git config user.name "wc6-archive-bot"; git config user.email "actions@users.noreply.github.com"
+          git add emails.json && git commit -m "Archive: add newly sent email(s)" && git push
+          echo "Published new email(s)." >> $GITHUB_STEP_SUMMARY
+      - name: Fail loudly if an email was skipped (GitHub emails the owner)
+        if: env.DONE != '1' && steps.build.outputs.code != '0'
+        run: |
+          echo "::error::An email was SKIPPED or GHL could not be read. Nothing partial was published. See the run summary."
+          exit 1
